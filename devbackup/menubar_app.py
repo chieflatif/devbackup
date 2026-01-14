@@ -6,8 +6,8 @@ A simple macOS menu bar application for DevBackup status and control.
 Uses rumps (Ridiculously Uncomplicated macOS Python Statusbar apps).
 
 This app is designed for non-technical users:
-- Starts automatically at login
-- Automatically starts the backup daemon
+- Starts automatically at login (optional)
+- Run backups with one click from the menu bar
 - All control via menu bar - no terminal needed
 """
 
@@ -20,7 +20,6 @@ from pathlib import Path
 
 import rumps
 
-from devbackup.ipc import IPCClient, DEFAULT_SOCKET_PATH, IPCError
 from devbackup.config import DEFAULT_CONFIG_PATH
 
 
@@ -231,11 +230,8 @@ class DevBackupMenuBar(rumps.App):
             rumps.MenuItem("Quit", callback=self.quit_app),
         ]
         
-        # IPC client
-        self.ipc = IPCClient()
-        
-        # Daemon process reference
-        self.daemon_process = None
+        # Track if backup is running
+        self._backup_in_progress = False
         
         # Check if setup is needed
         if not has_config():
@@ -243,18 +239,15 @@ class DevBackupMenuBar(rumps.App):
             self.last_backup_item.title = "No backups yet"
             self.title = "!"
         else:
-            # Auto-start the daemon service
-            self.ensure_daemon_running()
-            
             # Update last backup info immediately
             self.update_last_backup_info()
+            
+            # Set initial status
+            self.update_status(None)
             
             # Start status update timer
             self.timer = rumps.Timer(self.update_status, 30)
             self.timer.start()
-            
-            # Initial status check after a short delay
-            rumps.Timer(self.update_status, 2).start()
     
     def update_last_backup_info(self):
         """Update the last backup info in the menu."""
@@ -265,7 +258,7 @@ class DevBackupMenuBar(rumps.App):
                 if files_changed > 0:
                     self.last_backup_item.title = f"✓ Last: {time_ago} • {files_changed} changed / {total_files} total"
                 elif total_files > 0:
-                    self.last_backup_item.title = f"✓ Last: {time_ago} • {total_files} files (no changes)"
+                    self.last_backup_item.title = f"✓ Last: {time_ago} • {total_files} files"
                 else:
                     self.last_backup_item.title = f"✓ Last backup: {time_ago}"
             else:
@@ -273,31 +266,8 @@ class DevBackupMenuBar(rumps.App):
         else:
             self.last_backup_item.title = "No backups yet"
     
-    def ensure_daemon_running(self):
-        """Ensure the backup daemon is running."""
-        if DEFAULT_SOCKET_PATH.exists():
-            # Daemon already running
-            return
-        
-        # Start daemon in background
-        self.start_daemon()
-    
-    def start_daemon(self):
-        """Start the backup daemon process."""
-        try:
-            # Start daemon as subprocess
-            self.daemon_process = subprocess.Popen(
-                [sys.executable, "-m", "devbackup.daemon"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,  # Detach from parent
-            )
-        except Exception:
-            # Silently fail - we'll show "Service not running" in status
-            pass
-    
     def update_status(self, _):
-        """Update status from daemon or show ready state."""
+        """Update status display."""
         # If no config, show setup required
         if not has_config():
             self.status_item.title = "⚠️ Setup required"
@@ -308,52 +278,23 @@ class DevBackupMenuBar(rumps.App):
         # Update last backup info
         self.update_last_backup_info()
         
-        # If daemon not running, show ready state (not an error)
-        if not DEFAULT_SOCKET_PATH.exists():
-            self.status_item.title = "🟢 Ready to back up"
-            self.title = "DB"
+        # If backup is in progress, don't change status
+        if self._backup_in_progress:
             return
         
-        # Run IPC in background thread to avoid blocking
-        def check():
-            try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                status = loop.run_until_complete(self.ipc.request_status())
-                loop.close()
-                
-                status_text = status.get("status", "unknown")
-                message = status.get("message", "Unknown")
-                
-                # Update on main thread
-                if status_text == "protected":
-                    self.status_item.title = f"🟢 {message}"
-                    self.title = "✓"
-                elif status_text == "backing_up":
-                    pct = status.get("percent_complete")
-                    if pct is not None:
-                        self.status_item.title = f"🔵 Backing up... {int(pct)}%"
-                        self.title = f"{int(pct)}%"
-                    else:
-                        self.status_item.title = f"🔵 {message}"
-                        self.title = "↻"
-                elif status_text == "warning":
-                    self.status_item.title = f"🟡 {message}"
-                    self.title = "⚠"
-                elif status_text == "error":
-                    self.status_item.title = f"🔴 {message}"
-                    self.title = "✕"
-                else:
-                    self.status_item.title = f"🟢 Ready to back up"
-                    self.title = "DB"
-                    
-            except Exception as e:
-                # Connection error - daemon not responding, show ready state
+        # Check if we have any backups
+        info = get_last_backup_info()
+        if info:
+            time_ago, _, _, success = info
+            if success:
                 self.status_item.title = "🟢 Ready to back up"
                 self.title = "DB"
-        
-        thread = threading.Thread(target=check, daemon=True)
-        thread.start()
+            else:
+                self.status_item.title = "🟡 Last backup failed"
+                self.title = "⚠"
+        else:
+            self.status_item.title = "🟢 Ready to back up"
+            self.title = "DB"
     
     def backup_now(self, _):
         """Trigger immediate backup with progress display."""
@@ -366,6 +307,7 @@ class DevBackupMenuBar(rumps.App):
             return
         
         # Update UI immediately to show backup starting
+        self._backup_in_progress = True
         self.status_item.title = "🔵 Scanning files..."
         self.title = "⟳"
         
@@ -457,6 +399,7 @@ class DevBackupMenuBar(rumps.App):
             if progress["done"]:
                 # Backup finished - stop the timer
                 self._backup_running = False
+                self._backup_in_progress = False
                 if hasattr(self, '_progress_timer') and self._progress_timer:
                     self._progress_timer.stop()
                 
@@ -629,9 +572,8 @@ class DevBackupMenuBar(rumps.App):
                 time.sleep(2)
                 if has_config():
                     # Config exists now - update UI
-                    self.status_item.title = "⚪ Ready"
+                    self.status_item.title = "🟢 Ready to back up"
                     self.title = "DB"
-                    self.ensure_daemon_running()
                     
                     # Start status update timer if not already running
                     if not hasattr(self, 'timer') or not self.timer:
