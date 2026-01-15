@@ -21,30 +21,91 @@ fi
 echo "📦 Installing DevBackup..."
 echo ""
 
-# Check for Python 3.11+
-PYTHON=""
-for py in python3.13 python3.12 python3.11 python3; do
-    if command -v "$py" &> /dev/null; then
-        version=$("$py" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
-        major=$(echo "$version" | cut -d. -f1)
-        minor=$(echo "$version" | cut -d. -f2)
-        if [[ "$major" -ge 3 && "$minor" -ge 11 ]]; then
-            PYTHON="$py"
-            break
+# Function to find suitable Python
+find_python() {
+    for py in python3.13 python3.12 python3.11 python3; do
+        if command -v "$py" &> /dev/null; then
+            version=$("$py" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+            major=$(echo "$version" | cut -d. -f1)
+            minor=$(echo "$version" | cut -d. -f2)
+            if [[ "$major" -ge 3 && "$minor" -ge 11 ]]; then
+                echo "$py"
+                return 0
+            fi
         fi
-    fi
-done
+    done
+    return 1
+}
+
+# Check for Python 3.11+
+PYTHON=$(find_python) || PYTHON=""
 
 if [[ -z "$PYTHON" ]]; then
-    echo "❌ Python 3.11 or later is required."
+    echo "⚠️  Python 3.11 or later is required but not found."
     echo ""
-    echo "Install Python from: https://www.python.org/downloads/"
-    echo "Or with Homebrew: brew install python@3.12"
-    echo ""
-    read -p "Press Enter to exit..."
-    exit 1
+    
+    # Check if Homebrew is installed
+    if command -v brew &> /dev/null; then
+        echo "🍺 Homebrew detected. Installing Python 3.12..."
+        brew install python@3.12
+        
+        # Add Homebrew Python to PATH for this session
+        export PATH="/opt/homebrew/opt/python@3.12/bin:/usr/local/opt/python@3.12/bin:$PATH"
+        
+        PYTHON=$(find_python) || PYTHON=""
+        
+        if [[ -z "$PYTHON" ]]; then
+            echo "❌ Failed to install Python. Please install manually:"
+            echo "   brew install python@3.12"
+            read -p "Press Enter to exit..."
+            exit 1
+        fi
+    else
+        echo "Would you like to install Homebrew and Python automatically?"
+        echo "(Homebrew is a popular package manager for macOS)"
+        echo ""
+        read -p "Install Homebrew + Python? [Y/n] " -n 1 -r
+        echo ""
+        
+        if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+            echo ""
+            echo "🍺 Installing Homebrew..."
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            
+            # Add Homebrew to PATH for this session
+            if [[ -f "/opt/homebrew/bin/brew" ]]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+            elif [[ -f "/usr/local/bin/brew" ]]; then
+                eval "$(/usr/local/bin/brew shellenv)"
+            fi
+            
+            echo ""
+            echo "🐍 Installing Python 3.12..."
+            brew install python@3.12
+            
+            export PATH="/opt/homebrew/opt/python@3.12/bin:/usr/local/opt/python@3.12/bin:$PATH"
+            
+            PYTHON=$(find_python) || PYTHON=""
+            
+            if [[ -z "$PYTHON" ]]; then
+                echo "❌ Failed to install Python. Please try again or install manually."
+                read -p "Press Enter to exit..."
+                exit 1
+            fi
+        else
+            echo ""
+            echo "To install Python manually:"
+            echo "  • Download from: https://www.python.org/downloads/"
+            echo "  • Or install Homebrew first: https://brew.sh"
+            echo "    Then run: brew install python@3.12"
+            echo ""
+            read -p "Press Enter to exit..."
+            exit 1
+        fi
+    fi
 fi
 
+version=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 echo "✓ Found Python: $PYTHON ($version)"
 
 # Create virtual environment in user's home
